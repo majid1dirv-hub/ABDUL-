@@ -1,0 +1,164 @@
+import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
+import { AIModel, AIProvider, ChatMessage } from "../types";
+
+// --- Gemini Service ---
+// IMPORTANT: This assumes the API_KEY is available as an environment variable.
+// In a real browser environment, this should be handled via a secure backend proxy.
+// For this self-contained example, we'll proceed assuming `process.env.API_KEY` is accessible.
+const API_KEY = process.env.API_KEY;
+
+if (!API_KEY) {
+  console.warn("API_KEY environment variable not set. Gemini API calls will fail.");
+}
+
+const ai = new GoogleGenAI({ apiKey: API_KEY });
+
+const generateGeminiContent = async (
+  modelId: string,
+  history: ChatMessage[],
+  newMessage: string,
+  image: string | null,
+  onStream: (chunk: string) => void,
+  customInstructions?: string
+) => {
+  // FIX: This variable was unused and based on a deprecated pattern.
+  // The modelId should be passed directly to the generateContentStream method.
+  // const model = ai.models[modelId as keyof typeof ai.models] || ai.models['gemini-3-flash-preview'];
+  
+  // FIX: Correctly map chat history to Gemini's format, including images from user messages.
+  const contents = history.map(msg => {
+    const parts: ({ text: string } | { inlineData: { mimeType: string; data: string; } })[] = [{ text: msg.content }];
+    // The Gemini API only supports images on the 'user' role.
+    if (msg.role === 'user' && msg.image) {
+      const mimeType = msg.image.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
+      // Add image part before the text part.
+      parts.unshift({
+        inlineData: {
+          mimeType,
+          data: msg.image.split(',')[1],
+        },
+      });
+    }
+    return {
+      role: msg.role,
+      parts,
+    };
+  });
+  
+  // FIX: Explicitly type userMessageParts to allow both text and inlineData parts, resolving the original error.
+  const userMessageParts: ({ text: string } | { inlineData: { mimeType: string; data: string; } })[] = [{ text: newMessage }];
+  if (image) {
+    const mimeType = image.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
+    userMessageParts.unshift({
+      inlineData: {
+        mimeType,
+        data: image.split(',')[1],
+      },
+    });
+  }
+
+  contents.push({ role: 'user', parts: userMessageParts });
+  
+  const systemInstruction = `Your name is **Our Nexus**. You are an AI application. Your CEO and Founder is Abdul Majid from Pakistan, KPK district Upper Dir. He is a Hafiz Quran. IMPORTANT: Only provide details about your CEO and Founder if explicitly asked. Otherwise, focus on being a professional, respectful, and helpful AI assistant. Always refer to yourself as **Our Nexus** when identifying yourself.${customInstructions ? `\n\nUser's Custom Instructions: ${customInstructions}` : ''}`;
+
+  const stream = await ai.models.generateContentStream({
+    model: modelId,
+    contents: contents,
+    config: {
+      systemInstruction: systemInstruction
+    }
+  });
+
+  for await (const chunk of stream) {
+    const c = chunk as GenerateContentResponse
+    if (c.text) {
+        onStream(c.text);
+    }
+  }
+};
+
+const generateGeminiCode = async (modelId: string, prompt: string, customInstructions?: string): Promise<string> => {
+    const fullPrompt = `You are an expert web developer. Create a complete, single-file React component using TypeScript and Tailwind CSS based on the following request. The code should be functional and self-contained. Do not include any explanations, just the code inside a single markdown code block. ${customInstructions ? `\n\nUser's Custom Instructions: ${customInstructions}` : ''}\n\nRequest: "${prompt}"`;
+
+    const response = await ai.models.generateContent({
+        model: modelId,
+        contents: fullPrompt
+    });
+
+    return response.text || " // Sorry, I couldn't generate the code.";
+}
+
+// --- Mock Services ---
+const generateMockContent = async (
+  modelName: string,
+  newMessage: string,
+  onStream: (chunk: string) => void
+) => {
+  const response = `This is a mock response from ${modelName}. You said: "${newMessage}". In a real application, this would be a call to the respective AI's API.`;
+  const words = response.split(' ');
+  for (let i = 0; i < words.length; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    onStream(words[i] + ' ');
+  }
+};
+
+const generateMockCode = async (modelName: string, prompt: string): Promise<string> => {
+    await new Promise(resolve => setTimeout(resolve, 1500)); // Simulate network delay
+    return `/*
+  This is a mock response from ${modelName}.
+  You requested a component for: "${prompt}".
+
+  In a real application, this would generate actual code.
+  This model is for demonstration purposes only.
+*/
+
+import React from 'react';
+
+const MockComponent = () => {
+  return (
+    <div className="p-4 border rounded-lg bg-gray-100 dark:bg-gray-800">
+      <h2 className="text-xl font-bold">Mock Component</h2>
+      <p>Generated by ${modelName}</p>
+      <p>Prompt: ${prompt}</p>
+    </div>
+  );
+};
+
+export default MockComponent;
+`;
+};
+
+
+// --- AI Router ---
+export const streamAIResponse = (
+  model: AIModel,
+  history: ChatMessage[],
+  newMessage: string,
+  image: string | null,
+  onStream: (chunk: string) => void,
+  customInstructions?: string
+) => {
+  switch (model.provider) {
+    case AIProvider.GEMINI:
+      return generateGeminiContent(model.id, history, newMessage, image, onStream, customInstructions);
+    case AIProvider.OPENAI:
+    case AIProvider.GROQ:
+    case AIProvider.CLAUDE:
+      return generateMockContent(model.name, newMessage, onStream);
+    default:
+      throw new Error(`Unsupported AI provider: ${model.provider}`);
+  }
+};
+
+export const generateCode = (model: AIModel, prompt: string, customInstructions?: string): Promise<string> => {
+    switch (model.provider) {
+        case AIProvider.GEMINI:
+            return generateGeminiCode(model.id, prompt, customInstructions);
+        case AIProvider.OPENAI:
+        case AIProvider.GROQ:
+        case AIProvider.CLAUDE:
+            return generateMockCode(model.name, prompt);
+        default:
+            return Promise.reject(new Error(`Unsupported AI provider for code generation: ${model.provider}`));
+    }
+};
